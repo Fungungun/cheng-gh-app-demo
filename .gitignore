@@ -1,0 +1,10 @@
+# all the folders with name .venv no matter where they are in the project
+**/.venv/
+
+**/node_modules/
+
+*.env
+
+*.pem
+
+*.pyc
