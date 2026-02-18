@@ -1,11 +1,10 @@
-from github import Github
-from github.GithubIntegration import GithubIntegration
 import os
 from dotenv import load_dotenv
 import time
 import jwt  # pip install PyJWT cryptography
 import requests
 import base64
+from glob import glob
 
 
 load_dotenv()
@@ -151,10 +150,55 @@ def create_pr(inst_token: str, owner: str, repo: str, base: str, head: str, titl
     return r.json()["html_url"]
 
 
+def get_commit_tree_sha(inst_token: str, owner: str, repo: str, commit_sha: str) -> str:
+    url = f"{API}/repos/{owner}/{repo}/git/commits/{commit_sha}"
+    r = requests.get(url, headers=gh_headers(inst_token), timeout=30)
+    r.raise_for_status()
+    return r.json()["tree"]["sha"]
+
+
+def create_blob(inst_token: str, owner: str, repo: str, content_text: str) -> str:
+    url = f"{API}/repos/{owner}/{repo}/git/blobs"
+    payload = {"content": content_text, "encoding": "utf-8"}
+    r = requests.post(url, json=payload, headers=gh_headers(inst_token), timeout=30)
+    r.raise_for_status()
+    return r.json()["sha"]
+
+
+def create_tree(inst_token: str, owner: str, repo: str, base_tree_sha: str, entries: list[dict]) -> str:
+    url = f"{API}/repos/{owner}/{repo}/git/trees"
+    payload = {"base_tree": base_tree_sha, "tree": entries}
+    r = requests.post(url, json=payload, headers=gh_headers(inst_token), timeout=30)
+    r.raise_for_status()
+    return r.json()["sha"]
+
+
+def create_commit(inst_token: str, owner: str, repo: str, message: str, tree_sha: str, parents: list[str]) -> str:
+    url = f"{API}/repos/{owner}/{repo}/git/commits"
+    payload = {"message": message, "tree": tree_sha, "parents": parents}
+    r = requests.post(url, json=payload, headers=gh_headers(inst_token), timeout=30)
+    r.raise_for_status()
+    return r.json()["sha"]
+
+
+def update_ref(inst_token: str, owner: str, repo: str, branch: str, commit_sha: str) -> None:
+    url = f"{API}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+    payload = {"sha": commit_sha, "force": False}
+    r = requests.patch(url, json=payload, headers=gh_headers(inst_token), timeout=30)
+    r.raise_for_status()
+
+
+def collect_agent_files() -> list[tuple[str, str]]:
+    matches = sorted(glob(".github/agents/*.agent.md"))
+    files: list[tuple[str, str]] = []
+    for path in matches:
+        with open(path, "r", encoding="utf-8") as handle:
+            files.append((path.replace("\\", "/"), handle.read()))
+    return files
+
+
 installation_id = 109899039
 branch_name = os.environ.get("GH_BRANCH", f"agent-fix-{int(time.time())}")
-new_content = os.environ.get("GH_FILE_CONTENT", "hello from GitHub App agent\n")
-file_path = os.environ.get("GH_FILE_PATH", "agent_demo.txt")
 commit_msg = os.environ.get("GH_COMMIT_MSG", "Agent: demo change")
 pr_title = os.environ.get("GH_PR_TITLE", "Agent: demo PR")
 pr_body = os.environ.get("GH_PR_BODY", "This PR was created automatically by a GitHub App installation token.")
@@ -198,8 +242,25 @@ print("Base SHA:", base_sha)
 # 4) Create new branch
 create_branch(installation_token, owner, repo, branch_name, base_sha)
 
-# 5) Commit change (create/update a file)
-put_file(installation_token, owner, repo, file_path, branch_name, new_content, commit_msg)
+# 5) Commit all agent files as a single commit
+agent_files = collect_agent_files()
+if not agent_files:
+    raise RuntimeError("No .github/agents/*.agent.md files found in the local repo")
+
+base_tree_sha = get_commit_tree_sha(installation_token, owner, repo, base_sha)
+tree_entries = []
+for path, content in agent_files:
+    blob_sha = create_blob(installation_token, owner, repo, content)
+    tree_entries.append({
+        "path": path,
+        "mode": "100644",
+        "type": "blob",
+        "sha": blob_sha,
+    })
+
+new_tree_sha = create_tree(installation_token, owner, repo, base_tree_sha, tree_entries)
+commit_sha = create_commit(installation_token, owner, repo, commit_msg, new_tree_sha, [base_sha])
+update_ref(installation_token, owner, repo, branch_name, commit_sha)
 
 # 6) Open PR
 pr_url = create_pr(installation_token, owner, repo, base_branch, branch_name, pr_title, pr_body)
